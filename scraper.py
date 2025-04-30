@@ -14,7 +14,7 @@ import socket
 import re
 import csv
 from modules.googlesheets import GoogleSheetsExporter
-from modules.apollo_integration import enrich_company_size, fetch_poc_for_domain
+from modules.apollo_integration import enrich_company_size, fetch_poc_for_domain,find_similar_companies
 from config.constants import INCLUDED_REGIONS
 from pathlib import Path
 
@@ -425,20 +425,50 @@ def scrape_security_incidents(last_run_date: str = None) -> Tuple[List[Dict], st
     
     # Combine all data
     flattened = []
+    seen_domains = set()  # To avoid duplicates
+    
     for domain in filtered_domains:
-        if domain in incident_map:
+        if domain in incident_map and domain not in seen_domains:
             incident = incident_map[domain]
             incident.update(org_data.get(domain, {}))
             incident.update(contact_data.get(domain, {}))
             
-            # Additional filtering based on region
+            # Region filtering
             country = incident.get("Country", "")
-            if not any(region in country for region in INCLUDED_REGIONS):
+            if not (country.startswith("US-") or country.startswith("CA-")):
                 continue
                 
             flattened.append(incident)
+            seen_domains.add(domain)
+            
+            # NEW: Find similar companies
+            similar = find_similar_companies(domain)
+            for company in similar:
+                if company["domain"] not in seen_domains:
+                    similar_incident = {
+                        "Date of Breach": "Similar Company",
+                        "Source": "Apollo",
+                        "Type of Breach": "Potential Target",
+                        "Company Website": company["domain"],
+                        "Company Name": company["name"],
+                        "Company Size": company.get("estimated_num_employees", "N/A"),
+                        "Industry": company.get("industry", "")
+                    }
+                    
+                    # Enrich the similar company
+                    try:
+                        cdn, security, country, size, name = enrich_website(company["domain"])
+                        similar_incident.update({
+                            "CDN": cdn,
+                            "Security": security,
+                            "Country": country
+                        })
+                        flattened.append(similar_incident)
+                        seen_domains.add(company["domain"])
+                    except Exception as e:
+                        logger.error(f"Failed to enrich similar company {company['domain']}: {e}")
     
-    logger.info(f"Processed {len(flattened)} incidents after filtering.")
+    logger.info(f"Processed {len(flattened)} incidents (original + similar).")
     return flattened, datetime.now().strftime('%Y-%m-%d')
 
 def print_simple_breaches(incidents: List[Dict]):

@@ -74,7 +74,45 @@ def _apollo_request(method, url, json=None, params=None, headers=None):
     logger.error(f"❌ Failed after {MAX_RETRIES} attempts: {url}")
     return None
 
-
+def find_similar_companies(domain: str, regions: list = ["AMER"], min_employees: int = 50) -> List[Dict]:
+    """Find similar companies based on original company's attributes"""
+    if not domain:
+        return []
+    
+    # First get the original company's data
+    original = enrich_company_size(domain)
+    if not original or original.get("Company Size") == "N/A":
+        return []
+    
+    similar_companies = []
+    url = f"{APOLLO_API_URL}/mixed_people/search"
+    headers = {
+        "Cache-Control": "no-cache",
+        "Content-Type": "application/json",
+        "x-api-key": APOLLO_API_KEY
+    }
+    
+    params = {
+        "q_organization_domains": domain,
+        "page": 1,
+        "per_page": 10,  # Get top 10 similar
+        "organization_num_employees_ranges": original.get("estimated_num_employees_range", "50-1000"),
+        "api_key": APOLLO_API_KEY
+    }
+    
+    response = _apollo_request("GET", url, headers=headers, params=params)
+    
+    if response and response.get("organizations"):
+        for org in response["organizations"]:
+            if org["domain"] != domain:  # Exclude original
+                similar_companies.append({
+                    "domain": org["domain"],
+                    "name": org["name"],
+                    "estimated_num_employees": org.get("estimated_num_employees"),
+                    "industry": org.get("industry")
+                })
+    
+    return similar_companies
 
 # Main enrichment function for Company Size only
 def enrich_company_size(domain: str) -> Dict[str, str]:
