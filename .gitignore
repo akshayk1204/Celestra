@@ -1,0 +1,7 @@
+# .gitignore
+.env
+*.env
+config/settings.py
+__pycache__/
+logs/
+data/
