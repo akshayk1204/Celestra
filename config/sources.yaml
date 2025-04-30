@@ -1,0 +1,42 @@
+rss_feeds:
+  - name: "BleepingComputer"
+    display_name: "Bleeping Computer"
+    url: "https://www.bleepingcomputer.com/feed/"
+    categories: ["ransomware", "vulnerabilities"]
+    priority: 1
+    technical_ref: "cve"
+
+web_scrapers:
+  - name: "KrebsOnSecurity"
+    display_name: "Krebs on Security"  
+    url: "https://krebsonsecurity.com"
+    selectors:
+      container: "article.post"
+      title: "h2.entry-title"
+      link: "h2.entry-title a"
+      date: "span.entry-date"
+    categories: ["breaches", "cybercrime"]
+    priority: 2
+    technical_ref: "manual" 
+    source_type: "html"      
+
+apis:
+  - name: "CISA Alerts"
+    display_name: "CISA Known Exploited Vulnerabilities"
+    url: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    categories: ["government", "advisories"]
+    priority: 1
+
+api_sources:
+  - name: "LeakLookup"
+    endpoint: "https://leak-lookup.com/api/search"
+    categories: ["breaches"]
+    requires_auth: true
+    fields: ["name", "breach_date", "compromised_data"]
+
+dataset_sources:
+  - name: "B1ND"
+    url: "https://www.b1nd.net/datasets"
+    categories: ["breaches"]
+    format: "csv"
+    fields: ["Date", "Website", "Compromised Data"]
