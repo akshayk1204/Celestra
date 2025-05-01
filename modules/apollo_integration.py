@@ -74,45 +74,42 @@ def _apollo_request(method, url, json=None, params=None, headers=None):
     logger.error(f"❌ Failed after {MAX_RETRIES} attempts: {url}")
     return None
 
-def find_similar_companies(domain: str, regions: list = ["AMER"], min_employees: int = 50) -> List[Dict]:
-    """Find similar companies based on original company's attributes"""
-    if not domain:
-        return []
-    
-    # First get the original company's data
-    original = enrich_company_size(domain)
-    if not original or original.get("Company Size") == "N/A":
-        return []
-    
-    similar_companies = []
-    url = f"{APOLLO_API_URL}/mixed_people/search"
-    headers = {
-        "Cache-Control": "no-cache",
-        "Content-Type": "application/json",
-        "x-api-key": APOLLO_API_KEY
-    }
-    
-    params = {
-        "q_organization_domains": domain,
-        "page": 1,
-        "per_page": 10,  # Get top 10 similar
-        "organization_num_employees_ranges": original.get("estimated_num_employees_range", "50-1000"),
-        "api_key": APOLLO_API_KEY
-    }
-    
-    response = _apollo_request("GET", url, headers=headers, params=params)
-    
-    if response and response.get("organizations"):
-        for org in response["organizations"]:
-            if org["domain"] != domain:  # Exclude original
-                similar_companies.append({
-                    "domain": org["domain"],
-                    "name": org["name"],
-                    "estimated_num_employees": org.get("estimated_num_employees"),
-                    "industry": org.get("industry")
-                })
-    
-    return similar_companies
+
+def find_similar_companies(domain: str, max_results: int = 3) -> List[Dict]:
+    """Find companies in the same industry (US/CA only)"""
+    try:
+        # Get original company's industry first
+        original = enrich_company_size(domain)
+        if not original or not original.get("industry"):
+            return []
+
+        params = {
+            "q_organization_industries": [original["industry"]],
+            "page": 1,
+            "per_page": max_results + 5,  # Over-fetch for US/CA filtering
+            "organization_location_countries": ["US", "CA"],  # US/CA only
+            "api_key": APOLLO_API_KEY
+        }
+
+        response = _apollo_request("GET", 
+            f"{APOLLO_API_URL}/organizations/search",
+            params=params
+        )
+
+        return [
+            {
+                "domain": org["domain"],
+                "name": org["name"],
+                "industry": org["industry"],
+                "employees": org.get("estimated_num_employees")
+            }
+            for org in response.get("organizations", [])[:max_results]
+            if org["domain"] != domain  # Exclude original
+        ]
+    except Exception as e:
+        logger.error(f"Industry similarity search failed: {e}")
+        return []    
+
 
 # Main enrichment function for Company Size only
 def enrich_company_size(domain: str) -> Dict[str, str]:
@@ -162,18 +159,9 @@ def enrich_company_size(domain: str) -> Dict[str, str]:
     return enriched
 
 
-
+""""
 def fetch_poc_for_domain(domain: str) -> Dict[str, str]:
-    """
-    Enhanced contact lookup with better error handling and LinkedIn support
-    Returns: {
-        "Name": str,
-        "Title": str,
-        "Phone": str,
-        "Email": str,
-        "LinkedIn URL": str
-    }
-    """
+    
     if not domain:
         return {
             "Name": "Not Found",
@@ -211,7 +199,9 @@ def fetch_poc_for_domain(domain: str) -> Dict[str, str]:
                 "q_titles": [title],
                 "page": 1,
                 "per_page": 1,
-                "api_key": APOLLO_API_KEY
+                "api_key": APOLLO_API_KEY,
+                "reveal_personal_emails": True,  
+                "reveal_phone_numbers": True 
             }
 
             response = _apollo_request("GET", 
@@ -224,17 +214,23 @@ def fetch_poc_for_domain(domain: str) -> Dict[str, str]:
                 continue
 
             person = response["people"][0]
-            email = person.get("email", "Not Available")
+            email = person.get("email")
+            if not email:
+                email = person.get("personal_email", "Not Available")
             
             # Handle email restrictions
             if isinstance(email, str) and "not_unlocked" in email.lower():
                 email = "Email Restricted (Upgrade Required)"
 
+            # Get best available phone
+            phone_numbers = person.get("phone_numbers", [])
+            phone = phone_numbers[0].get("number") if phone_numbers else "Not Available"
+
             return {
                 "Name": person.get("name", "Not Found"),
                 "Title": title,
-                "Phone": person.get("phone_numbers", [{}])[0].get("number", "Not Available"),
-                "Email": email,
+                "Phone": phone,
+                "Email": email if email != "not_unlocked" else "Available (Upgrade Required)",
                 "LinkedIn URL": person.get("linkedin_url", "Not Available")
             }
 
@@ -249,8 +245,126 @@ def fetch_poc_for_domain(domain: str) -> Dict[str, str]:
         "Email": "Not Available",
         "LinkedIn URL": "Not Available"
     }
+"""
 
+def fetch_poc_for_domain(domain: str) -> Dict[str, str]:
+    """
+    Fetch point of contact using People Enrichment endpoint
+    Returns: {
+        "Name": str,
+        "Title": str,
+        "Phone": str,
+        "Email": str,
+        "LinkedIn URL": str
+    }
+    """
+    if not domain:
+        return {
+            "Name": "Not Found",
+            "Title": "Not Found",
+            "Phone": "Not Available",
+            "Email": "Not Available",
+            "LinkedIn URL": "Not Available"
+        }
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Content-Type": "application/json",
+        "x-api-key": APOLLO_API_KEY
+    }
+
+    # Try security titles in priority order
+    security_titles = [
+        "Chief Information Security Officer",
+        "CISO",
+        "Chief Security Officer",
+        "CSO",
+        "VP of Security",
+        "Director of Security"
+    ]
+
+    for title in security_titles:
+        try:
+            params = {
+                "domain": domain,
+                "reveal_personal_emails": True,  # Get emails
+                "reveal_phone_numbers": False,    # Avoid webhook requirement
+                "title": title                    # Filter by security title
+            }
+
+            response = _apollo_request(
+                "POST",
+                f"{APOLLO_API_URL}people/match",
+                headers=headers,
+                params=params
+            )
+
+            if not response or not response.get("person"):
+                continue
+
+            person = response["person"]
+            
+            # Email handling
+            email = person.get("email")
+            if not email or "not_unlocked" in str(email).lower():
+                email = person.get("contact", {}).get("email", "Not Available")
+            
+            # Phone handling (basic - no verification)
+            phone = "Not Available"
+            if person.get("contact", {}).get("phone_numbers"):
+                phone = person["contact"]["phone_numbers"][0].get("sanitized_number", "Not Available")
+
+            return {
+                "Name": person.get("name", "Not Found"),
+                "Title": person.get("title", title),
+                "Phone": phone,
+                "Email": email if email != "not_unlocked" else "Available (Upgrade Required)",
+                "LinkedIn URL": person.get("linkedin_url", "Not Available")
+            }
+
+        except Exception as e:
+            logger.error(f"Error enriching {domain} for {title}: {str(e)}")
+            continue
+
+    # Fallback to generic lookup if no security titles found
+    try:
+        params = {
+            "domain": domain,
+            "reveal_personal_emails": True,
+            "reveal_phone_numbers": False
+        }
+
+        response = _apollo_request(
+            "POST",
+            f"{APOLLO_API_URL}people/match",
+            headers=headers,
+            params=params
+        )
+
+        if response and response.get("person"):
+            person = response["person"]
+            email = person.get("email", "Not Available")
+            phone = person.get("contact", {}).get("phone_numbers", [{}])[0].get("sanitized_number", "Not Available")
+            
+            return {
+                "Name": person.get("name", "Not Found"),
+                "Title": person.get("title", "Not Found"),
+                "Phone": phone,
+                "Email": email if email != "not_unlocked" else "Available (Upgrade Required)",
+                "LinkedIn URL": person.get("linkedin_url", "Not Available")
+            }
+    except Exception as e:
+        logger.error(f"Generic enrichment failed for {domain}: {str(e)}")
+
+    return {
+        "Name": "Not Found",
+        "Title": "Not Found",
+        "Phone": "Not Available",
+        "Email": "Not Available",
+        "LinkedIn URL": "Not Available"
+    }
     
+
 
 # Example CLI usage
 if __name__ == "__main__":

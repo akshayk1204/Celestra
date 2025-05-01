@@ -17,22 +17,29 @@ class GoogleSheetsExporter:
         self.client = gspread.authorize(self.creds)
         self.sheet_name = sheet_name
         self.sheet = None
-        # Initialize formatting objects if gspread_formatting is available
+        
         try:
             from gspread_formatting import (
-                CellFormat,
-                TextFormat,
-                Color,
-                format_cell_range,
-                set_column_widths,
-                cellFormat,  # Note the lowercase 'c' (this is correct)
-                numberFormat
+                CellFormat, TextFormat, Color,
+                format_cell_range, set_column_widths,
+                cellFormat, numberFormat
             )
             self.formatting = True
-            self.fmt = CellFormat(
+            # Header format
+            self.header_fmt = CellFormat(
                 textFormat=TextFormat(bold=True, fontSize=12, foregroundColor=Color(1, 1, 1)),
                 backgroundColor=Color(0.2, 0.4, 0.6),
                 horizontalAlignment='CENTER'
+            )
+            # Email highlight format
+            self.email_fmt = CellFormat(
+                backgroundColor=Color(0.9, 1, 0.9),  # Light green
+                textFormat=TextFormat(foregroundColor=Color(0, 0.5, 0))  # Dark green
+            )
+            # Phone highlight format
+            self.phone_fmt = CellFormat(
+                backgroundColor=Color(0.9, 0.9, 1),  # Light blue
+                textFormat=TextFormat(foregroundColor=Color(0, 0, 0.8))  # Dark blue
             )
         except ImportError:
             self.formatting = False
@@ -44,25 +51,21 @@ class GoogleSheetsExporter:
         return now.strftime("%B %Y")
 
     def _format_header(self, worksheet):
-        """Apply beautiful formatting to the header row with updated column widths."""
+        """Apply formatting to the header row with updated column widths."""
         if not self.formatting:
             return
             
         try:
             from gspread_formatting import (
-                format_cell_range,
-                set_column_widths,
-                cellFormat,
-                numberFormat
+                format_cell_range, set_column_widths,
+                cellFormat, numberFormat
             )
             
-            # Format header row (A1:N1)
-            format_cell_range(worksheet, '1:1', self.fmt)
-            
-            # Freeze header row
+            # Format header row
+            format_cell_range(worksheet, '1:1', self.header_fmt)
             worksheet.freeze(rows=1)
             
-            # Set column widths for the new column order
+            # Set column widths - adjusted for better contact info visibility
             set_column_widths(worksheet, [
                 ('A:A', 100),    # Date of Breach
                 ('B:B', 200),    # Company Name
@@ -74,8 +77,8 @@ class GoogleSheetsExporter:
                 ('H:H', 100),    # Country
                 ('I:I', 150),    # Contact Name
                 ('J:J', 150),    # Contact Title
-                ('K:K', 120),    # Contact Phone
-                ('L:L', 150),    # Contact Email
+                ('K:K', 150),    # Contact Phone (wider)
+                ('L:L', 200),    # Contact Email (wider)
                 ('M:M', 150),    # LinkedIn URL
                 ('N:N', 100)     # Source
             ])
@@ -86,6 +89,23 @@ class GoogleSheetsExporter:
             )
             format_cell_range(worksheet, 'A2:A1000', date_fmt)
             
+            # Highlight valid email and phone cells
+            format_cell_range(worksheet, 'L2:L1000', {
+                "condition": {
+                    "type": "TEXT_CONTAINS",
+                    "values": [{"userEnteredValue": "@"}]
+                },
+                "format": self.email_fmt
+            })
+            
+            format_cell_range(worksheet, 'K2:K1000', {
+                "condition": {
+                    "type": "TEXT_CONTAINS",
+                    "values": [{"userEnteredValue": "+"}]
+                },
+                "format": self.phone_fmt
+            })
+            
         except Exception as e:
             print(f"Header formatting failed (non-critical): {e}")
 
@@ -95,23 +115,31 @@ class GoogleSheetsExporter:
             return False
 
         try:
-            # Convert to DataFrame
+            # Convert to DataFrame and clean data
             df = pd.DataFrame(incidents)
             
-            # Define the desired column order
+            # Clean contact information
+            df['Contact Email'] = df['Contact Email'].apply(
+                lambda x: x if isinstance(x, str) and "@" in x else "Not Available"
+            )
+            df['Contact Phone'] = df['Contact Phone'].apply(
+                lambda x: x if isinstance(x, str) and x.replace("+", "").isdigit() else "Not Available"
+            )
+            
+            # Define column order with contact info prioritized
             column_order = [
                 'Date of Breach',
                 'Company Name',
                 'Company Website',
+                'Contact Name',
+                'Contact Title',
+                'Contact Phone',  # Moved up
+                'Contact Email',  # Moved up
                 'Company Size',
                 'Type of Breach',
                 'CDN',
                 'Security',
                 'Country',
-                'Contact Name',
-                'Contact Title',
-                'Contact Phone',
-                'Contact Email',
                 'LinkedIn URL',
                 'Source'
             ]
@@ -130,16 +158,18 @@ class GoogleSheetsExporter:
             except gspread.WorksheetNotFound:
                 worksheet = self.sheet.add_worksheet(title=tab_name, rows="1000", cols="20")
 
-            # Clear and update data
-            df = df.applymap(lambda x: x[0] if isinstance(x, list) and x else x)
+            # Clear and update data - ensure all values are strings
             worksheet.clear()
-            worksheet.update([df.columns.tolist()] + df.values.tolist())
+            data = df.fillna('').astype(str).values.tolist()
+            worksheet.update([df.columns.tolist()] + data)
 
-            # Apply beautiful formatting
-            self._format_header(worksheet)
+            # Apply formatting
+            if self.formatting:
+                self._format_header(worksheet)
 
             print(f"Exported {len(df)} incidents to Google Sheet tab '{tab_name}'")
             return True
+            
         except Exception as e:
             print(f"[GoogleSheetsExporter] Export failed: {e}")
             return False

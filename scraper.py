@@ -14,7 +14,7 @@ import socket
 import re
 import csv
 from modules.googlesheets import GoogleSheetsExporter
-from modules.apollo_integration import enrich_company_size, fetch_poc_for_domain,find_similar_companies
+from modules.apollo_integration import enrich_company_size, fetch_poc_for_domain, find_similar_companies
 from config.constants import INCLUDED_REGIONS
 from pathlib import Path
 
@@ -195,7 +195,7 @@ def bulk_enrich_organizations(domains: List[str]) -> Dict[str, Dict]:
     return enriched
 
 def bulk_enrich_contacts(domains: List[str]) -> Dict[str, Dict]:
-    """Bulk enrich contact information"""
+    """Bulk enrich contact information (email-focused)"""
     contacts = {}
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -208,8 +208,8 @@ def bulk_enrich_contacts(domains: List[str]) -> Dict[str, Dict]:
                 contacts[domain] = {
                     "Contact Name": contact_data.get("Name", "Not Found"),
                     "Contact Title": contact_data.get("Title", "Not Found"),
-                    "Contact Phone": contact_data.get("Phone", "Not Found"),
-                    "Contact Email": contact_data.get("Email", "Not Found"),
+                    "Contact Phone": "Available via Individual Lookup",  # Indicate phone requires separate lookup
+                    "Contact Email": contact_data.get("Email", "Not Available"),
                     "LinkedIn URL": contact_data.get("LinkedIn URL", "Not Available")
                 }
             except Exception as e:
@@ -426,6 +426,7 @@ def scrape_security_incidents(last_run_date: str = None) -> Tuple[List[Dict], st
     # Combine all data
     flattened = []
     seen_domains = set()  # To avoid duplicates
+    similar_added_total = 0  # Track total similar companies added
     
     for domain in filtered_domains:
         if domain in incident_map and domain not in seen_domains:
@@ -433,7 +434,7 @@ def scrape_security_incidents(last_run_date: str = None) -> Tuple[List[Dict], st
             incident.update(org_data.get(domain, {}))
             incident.update(contact_data.get(domain, {}))
             
-            # Region filtering
+            # Region filtering - only US/CA companies
             country = incident.get("Country", "")
             if not (country.startswith("US-") or country.startswith("CA-")):
                 continue
@@ -441,34 +442,42 @@ def scrape_security_incidents(last_run_date: str = None) -> Tuple[List[Dict], st
             flattened.append(incident)
             seen_domains.add(domain)
             
-            # NEW: Find similar companies
-            similar = find_similar_companies(domain)
+            # Find max 3 similar companies
+            similar = find_similar_companies(domain, max_results=3)
+            similar_added = 0
+            
             for company in similar:
-                if company["domain"] not in seen_domains:
-                    similar_incident = {
-                        "Date of Breach": "Similar Company",
-                        "Source": "Apollo",
-                        "Type of Breach": "Potential Target",
-                        "Company Website": company["domain"],
-                        "Company Name": company["name"],
-                        "Company Size": company.get("estimated_num_employees", "N/A"),
-                        "Industry": company.get("industry", "")
-                    }
+                if similar_added >= 3:  # Hard stop at 3
+                    break
                     
-                    # Enrich the similar company
+                if company["domain"] not in seen_domains:
                     try:
+                        # Enrich the similar company
                         cdn, security, country, size, name = enrich_website(company["domain"])
-                        similar_incident.update({
-                            "CDN": cdn,
-                            "Security": security,
-                            "Country": country
-                        })
-                        flattened.append(similar_incident)
-                        seen_domains.add(company["domain"])
+                        
+                        # Only add if also in US/CA
+                        if country.startswith(("US-", "CA-")):
+                            similar_incident = {
+                                "Date of Breach": "Similar Company",
+                                "Source": "Apollo",
+                                "Type of Breach": "Potential Target",
+                                "Company Website": company["domain"],
+                                "Company Name": company["name"],
+                                "Company Size": company.get("employees", size),
+                                "Industry": company.get("industry", ""),
+                                "CDN": cdn,
+                                "Security": security,
+                                "Country": country
+                            }
+                            flattened.append(similar_incident)
+                            seen_domains.add(company["domain"])
+                            similar_added += 1
+                            similar_added_total += 1
+                            
                     except Exception as e:
-                        logger.error(f"Failed to enrich similar company {company['domain']}: {e}")
+                        logger.error(f"Skipping similar company {company['domain']}: {e}")
     
-    logger.info(f"Processed {len(flattened)} incidents (original + similar).")
+    logger.info(f"Processed {len(flattened)} incidents ({similar_added_total} similar companies added).")
     return flattened, datetime.now().strftime('%Y-%m-%d')
 
 def print_simple_breaches(incidents: List[Dict]):
